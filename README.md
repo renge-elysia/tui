@@ -6,7 +6,8 @@
 
 - 支持自定义任意合法端口，例如 `443`、`8443`、`2053`
 - 默认监听 `[::]:PORT`，支持 IPv4 / IPv6 双栈
-- 自动生成 UUID、密码和自签 TLS 证书
+- 自动生成 UUID、密码和 TLS 证书
+- 支持自签证书、已有 PEM 证书、acme.sh + Cloudflare DNS 自动申请
 - 自动识别 VPS 架构并下载对应 `tuic-server` 二进制
 - 自动创建、启动并启用 systemd / OpenRC 服务
 - 自动输出 TUIC 节点链接，方便复制到客户端
@@ -103,6 +104,79 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 - `cubic`
 - `new_reno`
 
+## 配置 TLS 证书
+
+脚本支持三种证书方式：
+
+- 默认自签证书：不传证书参数时自动生成，节点链接会带 `allow_insecure=1`
+- 使用已有证书：传入 `--cert-file` 和 `--key-file`
+- 自动申请证书：使用 `--acme-dns-cf` 调用 acme.sh，通过 Cloudflare DNS 验证申请
+
+### 方式一：acme.sh + Cloudflare DNS
+
+DNS 验证不需要开放 80/443 端口，适合 NAT VPS、端口转发 VPS、只有随机端口的 VPS。
+
+先准备 Cloudflare 账号邮箱和 Global API Key，然后执行：
+
+```bash
+export CF_Key="你的Global_API_Key"
+export CF_Email="你的Cloudflare邮箱"
+
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) \
+  --port 49255 \
+  --domain example.com \
+  --acme-dns-cf
+```
+
+NAT / 端口转发 VPS 示例：
+
+```bash
+export CF_Key="你的Global_API_Key"
+export CF_Email="你的Cloudflare邮箱"
+
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) \
+  --port 49255 \
+  --external-port 30001 \
+  --public-host example.com \
+  --domain example.com \
+  --acme-dns-cf
+```
+
+说明：
+
+- `--domain` 会作为证书域名和节点链接里的 SNI
+- `--public-host` 是节点链接里的连接地址，NAT VPS 建议填公网域名或公网 IP
+- Cloudflare API Key 不要写进 GitHub README、脚本或公开日志
+
+### 方式二：使用已有 PEM 证书
+
+如果你已经有证书和私钥，把它们保存到 VPS 上：
+
+```bash
+mkdir -p /root/tuic-cert
+nano /root/tuic-cert/cert.pem
+nano /root/tuic-cert/private.key
+chmod 600 /root/tuic-cert/private.key
+```
+
+然后安装：
+
+```bash
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) \
+  --port 49255 \
+  --domain example.com \
+  --cert-file /root/tuic-cert/cert.pem \
+  --key-file /root/tuic-cert/private.key
+```
+
+脚本会校验证书和私钥是否匹配；不匹配会直接停止安装。
+
+Cloudflare Origin Certificate 也可以用这种方式，但要注意：
+
+- 你需要同时保存 Cloudflare 提供的 Certificate 和 Private Key
+- 只贴 Certificate PEM 不够，服务端无法启动
+- Cloudflare Origin CA 通常不被普通客户端系统信任，TUIC 客户端仍可能需要允许不安全证书或导入 Origin CA
+
 ## NAT VPS / 端口转发 VPS
 
 NAT VPS 通常有两个端口：
@@ -178,7 +252,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 | `--public-host` | NAT / 端口转发 VPS 的公网 IP 或域名 | 自动检测公网 IP |
 | `-u, --uuid` | TUIC 用户 UUID | 随机生成 |
 | `-w, --password` | TUIC 用户密码 | 随机生成 |
-| `-s, --sni` | 自签证书 CN 和节点链接里的 SNI | `www.bing.com` |
+| `-d, --domain` | 证书域名，未显式传 `--sni` 时也作为 SNI | 无 |
+| `-s, --sni` | 节点链接里的 SNI | `--domain` 或 `www.bing.com` |
+| `--cert-file` | 已有证书 / fullchain PEM 路径 | 无 |
+| `--key-file` | 已有私钥 PEM 路径 | 无 |
+| `--acme-dns-cf` | 使用 acme.sh + Cloudflare DNS 自动申请证书 | 关闭 |
 | `-c, --congestion-control` | 拥塞控制算法：`bbr`、`cubic`、`new_reno` | `bbr` |
 | `-v, --version` | 指定 `tuic-server` release 标签 | `latest` |
 | `--no-firewall` | 不自动配置 `ufw` / `firewalld` | 关闭 |
@@ -248,10 +326,11 @@ TUIC 基于 QUIC，主要使用 UDP。安装后请确认两处都已放行对应
 
 ## 注意事项
 
-- 脚本生成的是自签证书，因此节点链接会包含 `allow_insecure=1`。
+- 默认自签证书和 Cloudflare Origin Certificate 通常需要客户端允许不安全证书；公开信任证书可减少这类兼容问题。
 - 如果 VPS 没有 IPv6 地址，IPv6 链接不会输出。
 - 如果系统不支持 IPv4-mapped IPv6 socket，双栈监听可能无法同时覆盖 IPv4 和 IPv6。
-- 如果安装失败，先查看 `systemctl status tuic --no-pager` 和 `journalctl -u tuic -e --no-pager`。
+- 如果 systemd 系统安装失败，先查看 `systemctl status tuic --no-pager` 和 `journalctl -u tuic -e --no-pager`。
+- 如果 Alpine/OpenRC 安装失败，先查看 `rc-service tuic status` 和系统日志。
 
 ## 上游项目
 

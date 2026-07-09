@@ -12,7 +12,11 @@ PUBLIC_HOST=""
 EXTERNAL_PORT=""
 UUID_VALUE=""
 PASSWORD_VALUE=""
+DOMAIN_VALUE=""
 SNI_VALUE="www.bing.com"
+CERT_FILE=""
+KEY_FILE=""
+ACME_DNS_CF=0
 CONGESTION_CONTROL="bbr"
 VERSION_VALUE="${TUIC_VERSION:-latest}"
 OPEN_FIREWALL=1
@@ -32,7 +36,11 @@ Options:
       --public-host <host>        Public IP or domain for NAT/port-forwarded VPS.
   -u, --uuid <uuid>               User UUID. Default: random.
   -w, --password <password>       User password. Default: random.
+  -d, --domain <domain>           Domain for certificate and SNI.
   -s, --sni <name>                Certificate CN and link SNI. Default: www.bing.com.
+      --cert-file <path>          Existing certificate/fullchain PEM file.
+      --key-file <path>           Existing private key PEM file.
+      --acme-dns-cf               Issue a certificate with acme.sh Cloudflare DNS.
   -c, --congestion-control <cc>   cubic, new_reno, or bbr. Default: bbr.
   -v, --version <tag>             Release tag, for example tuic-server-1.0.0. Default: latest.
       --no-firewall               Do not open the UDP port with ufw/firewalld.
@@ -47,6 +55,7 @@ Examples:
   bash install.sh --port 443
   bash install.sh --port 8443 --congestion-control cubic --sni example.com
   bash install.sh --port 49255 --external-port 30001 --public-host 203.0.113.10
+  CF_Key=xxx CF_Email=me@example.com bash install.sh --port 443 --domain example.com --acme-dns-cf
 USAGE
 }
 
@@ -137,6 +146,10 @@ valid_sni() {
 }
 
 valid_public_host() {
+  [[ -n "$1" && "$1" != *"/"* && "$1" != *" "* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
+}
+
+valid_domain() {
   [[ -n "$1" && "$1" != *"/"* && "$1" != *" "* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
 }
 
@@ -243,7 +256,68 @@ download_binary() {
   "$BIN_PATH" --version >/dev/null
 }
 
-write_certificate() {
+validate_certificate_pair() {
+  local cert="$1" key="$2" cert_pub key_pub
+  openssl x509 -in "$cert" -noout >/dev/null 2>&1 || die "invalid certificate file: $cert"
+  openssl pkey -in "$key" -noout >/dev/null 2>&1 || die "invalid private key file: $key"
+
+  cert_pub="$(openssl x509 -in "$cert" -pubkey -noout | openssl sha256)"
+  key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl sha256)"
+  [[ "$cert_pub" == "$key_pub" ]] || die "certificate and private key do not match"
+}
+
+copy_certificate_files() {
+  [[ -f "$CERT_FILE" ]] || die "certificate file not found: $CERT_FILE"
+  [[ -f "$KEY_FILE" ]] || die "private key file not found: $KEY_FILE"
+  validate_certificate_pair "$CERT_FILE" "$KEY_FILE"
+
+  install -m 0644 "$CERT_FILE" "${CONFIG_DIR}/certificate.crt"
+  install -m 0600 "$KEY_FILE" "${CONFIG_DIR}/private.key"
+}
+
+find_acme_sh() {
+  if command -v acme.sh >/dev/null 2>&1; then
+    command -v acme.sh
+  elif [[ -x "${HOME}/.acme.sh/acme.sh" ]]; then
+    echo "${HOME}/.acme.sh/acme.sh"
+  elif [[ -x "/root/.acme.sh/acme.sh" ]]; then
+    echo "/root/.acme.sh/acme.sh"
+  else
+    return 1
+  fi
+}
+
+install_acme_sh() {
+  local email="$1"
+  if find_acme_sh >/dev/null 2>&1; then
+    return 0
+  fi
+  curl https://get.acme.sh | sh -s "email=${email}"
+}
+
+issue_certificate_acme_cf() {
+  local acme email
+  [[ -n "$DOMAIN_VALUE" ]] || die "--domain is required with --acme-dns-cf"
+  [[ -n "${CF_Key:-}" ]] || die "CF_Key environment variable is required for Cloudflare DNS"
+  [[ -n "${CF_Email:-}" ]] || die "CF_Email environment variable is required for Cloudflare DNS"
+  email="${CF_Email}"
+
+  install_acme_sh "$email"
+  acme="$(find_acme_sh)" || die "acme.sh installation failed"
+
+  "$acme" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  "$acme" --issue --dns dns_cf -d "$DOMAIN_VALUE" --keylength ec-256
+  "$acme" --install-cert -d "$DOMAIN_VALUE" --ecc \
+    --fullchain-file "${CONFIG_DIR}/certificate.crt" \
+    --key-file "${CONFIG_DIR}/private.key" \
+    --reloadcmd "service ${SERVICE_NAME} restart 2>/dev/null || rc-service ${SERVICE_NAME} restart 2>/dev/null || systemctl restart ${SERVICE_NAME} 2>/dev/null || true"
+
+  chmod 644 "${CONFIG_DIR}/certificate.crt"
+  chmod 600 "${CONFIG_DIR}/private.key"
+  validate_certificate_pair "${CONFIG_DIR}/certificate.crt" "${CONFIG_DIR}/private.key"
+}
+
+generate_self_signed_certificate() {
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
 
@@ -260,6 +334,20 @@ write_certificate() {
 
   chmod 600 "${CONFIG_DIR}/private.key"
   chmod 644 "${CONFIG_DIR}/certificate.crt"
+}
+
+write_certificate() {
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+
+  if [[ "$ACME_DNS_CF" -eq 1 ]]; then
+    issue_certificate_acme_cf
+  elif [[ -n "$CERT_FILE" || -n "$KEY_FILE" ]]; then
+    [[ -n "$CERT_FILE" && -n "$KEY_FILE" ]] || die "--cert-file and --key-file must be used together"
+    copy_certificate_files
+  else
+    generate_self_signed_certificate
+  fi
 }
 
 write_config() {
@@ -506,6 +594,15 @@ install_service() {
   if [[ -n "$PUBLIC_HOST" ]]; then
     valid_public_host "$PUBLIC_HOST" || die "invalid public host: $PUBLIC_HOST"
   fi
+  if [[ -n "$DOMAIN_VALUE" ]]; then
+    valid_domain "$DOMAIN_VALUE" || die "invalid domain: $DOMAIN_VALUE"
+  fi
+  if [[ "$ACME_DNS_CF" -eq 1 && -n "$CERT_FILE$KEY_FILE" ]]; then
+    die "--acme-dns-cf cannot be used together with --cert-file/--key-file"
+  fi
+  if [[ "$ACME_DNS_CF" -eq 1 && -z "$DOMAIN_VALUE" ]]; then
+    die "--domain is required with --acme-dns-cf"
+  fi
   [[ "$CONGESTION_CONTROL" =~ ^(cubic|new_reno|bbr)$ ]] || die "invalid congestion control: $CONGESTION_CONTROL"
   [[ "$(detect_service_manager)" != "none" ]] || die "missing supported service manager: systemd or OpenRC"
   valid_service_name "$SERVICE_NAME" || die "invalid service name: $SERVICE_NAME"
@@ -559,7 +656,11 @@ while [[ $# -gt 0 ]]; do
     --public-host) PUBLIC_HOST="${2:-}"; shift 2 ;;
     -u|--uuid) UUID_VALUE="${2:-}"; shift 2 ;;
     -w|--password) PASSWORD_VALUE="${2:-}"; shift 2 ;;
+    -d|--domain) DOMAIN_VALUE="${2:-}"; shift 2 ;;
     -s|--sni) SNI_VALUE="${2:-}"; shift 2 ;;
+    --cert-file) CERT_FILE="${2:-}"; shift 2 ;;
+    --key-file) KEY_FILE="${2:-}"; shift 2 ;;
+    --acme-dns-cf) ACME_DNS_CF=1; shift ;;
     -c|--congestion-control) CONGESTION_CONTROL="${2:-}"; shift 2 ;;
     -v|--version) VERSION_VALUE="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
@@ -572,6 +673,10 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown argument: $1" ;;
   esac
 done
+
+if [[ -n "$DOMAIN_VALUE" && "$SNI_VALUE" == "www.bing.com" ]]; then
+  SNI_VALUE="$DOMAIN_VALUE"
+fi
 
 case "$ACTION" in
   install) install_service ;;

@@ -8,6 +8,8 @@ CONFIG_DIR="/etc/tuic"
 BIN_PATH="/usr/local/bin/tuic-server"
 SERVICE_NAME="tuic"
 PORT=""
+PUBLIC_HOST=""
+EXTERNAL_PORT=""
 UUID_VALUE=""
 PASSWORD_VALUE=""
 SNI_VALUE="www.bing.com"
@@ -26,6 +28,8 @@ Usage:
 
 Options:
   -p, --port <port>               UDP listen port. Required for install.
+      --external-port <port>      Public mapped UDP port for NAT/port-forwarded VPS.
+      --public-host <host>        Public IP or domain for NAT/port-forwarded VPS.
   -u, --uuid <uuid>               User UUID. Default: random.
   -w, --password <password>       User password. Default: random.
   -s, --sni <name>                Certificate CN and link SNI. Default: www.bing.com.
@@ -42,6 +46,7 @@ Options:
 Examples:
   bash install.sh --port 443
   bash install.sh --port 8443 --congestion-control cubic --sni example.com
+  bash install.sh --port 49255 --external-port 30001 --public-host 203.0.113.10
 USAGE
 }
 
@@ -109,7 +114,7 @@ install_dependencies() {
   elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm curl openssl ca-certificates coreutils
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl openssl ca-certificates coreutils
+    apk add --no-cache curl openssl ca-certificates coreutils openrc
   else
     die "cannot install dependencies automatically; please install curl, openssl, ca-certificates, and coreutils"
   fi
@@ -129,6 +134,20 @@ valid_service_name() {
 
 valid_sni() {
   [[ -n "$1" && "$1" != *"/"* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
+}
+
+valid_public_host() {
+  [[ -n "$1" && "$1" != *"/"* && "$1" != *" "* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
+}
+
+detect_service_manager() {
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    echo "systemd"
+  elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+    echo "openrc"
+  else
+    echo "none"
+  fi
 }
 
 random_password() {
@@ -276,7 +295,7 @@ EOF
   chmod 600 "${CONFIG_DIR}/config.json"
 }
 
-write_service() {
+write_systemd_service() {
   cat >"/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=TUIC server
@@ -297,6 +316,60 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+write_openrc_service() {
+  cat >"/etc/init.d/${SERVICE_NAME}" <<EOF
+#!/sbin/openrc-run
+
+name="TUIC server"
+description="TUIC server"
+supervisor="supervise-daemon"
+command="${BIN_PATH}"
+command_args="-c ${CONFIG_DIR}/config.json"
+respawn_delay=3
+respawn_max=0
+
+depend() {
+  need net
+  after firewall
+}
+EOF
+  chmod 755 "/etc/init.d/${SERVICE_NAME}"
+}
+
+write_service() {
+  case "$(detect_service_manager)" in
+    systemd) write_systemd_service ;;
+    openrc) write_openrc_service ;;
+    *) die "missing supported service manager: systemd or OpenRC" ;;
+  esac
+}
+
+start_service() {
+  case "$(detect_service_manager)" in
+    systemd)
+      systemctl daemon-reload
+      systemctl enable --now "${SERVICE_NAME}.service"
+      sleep 1
+      systemctl is-active --quiet "${SERVICE_NAME}.service" || {
+        systemctl --no-pager --full status "${SERVICE_NAME}.service" || true
+        die "service failed to start"
+      }
+      ;;
+    openrc)
+      rc-update add "${SERVICE_NAME}" default >/dev/null
+      rc-service "${SERVICE_NAME}" restart
+      sleep 1
+      rc-service "${SERVICE_NAME}" status >/dev/null || {
+        rc-service "${SERVICE_NAME}" status || true
+        die "service failed to start"
+      }
+      ;;
+    *)
+      die "missing supported service manager: systemd or OpenRC"
+      ;;
+  esac
 }
 
 open_firewall() {
@@ -352,7 +425,7 @@ get_public_ip() {
 }
 
 make_link() {
-  local host="$1" label="$2" host_for_link pass_enc sni_enc label_enc
+  local host="$1" label="$2" link_port="$3" host_for_link pass_enc sni_enc label_enc
   pass_enc="$(url_encode "$PASSWORD_VALUE")"
   sni_enc="$(url_encode "$SNI_VALUE")"
   label_enc="$(url_encode "$label")"
@@ -362,29 +435,37 @@ make_link() {
   fi
 
   printf 'tuic://%s:%s@%s:%s?congestion_control=%s&udp_relay_mode=native&alpn=h3&sni=%s&allow_insecure=1#%s' \
-    "$UUID_VALUE" "$pass_enc" "$host_for_link" "$PORT" "$CONGESTION_CONTROL" "$sni_enc" "$label_enc"
+    "$UUID_VALUE" "$pass_enc" "$host_for_link" "$link_port" "$CONGESTION_CONTROL" "$sni_enc" "$label_enc"
 }
 
 save_links() {
-  local ipv4 ipv6 link4 link6
+  local ipv4 ipv6 link4 link6 link_port
+  link_port="${EXTERNAL_PORT:-$PORT}"
   : >"${INSTALL_DIR}/links.txt"
   {
     echo "UUID=${UUID_VALUE}"
     echo "PASSWORD=${PASSWORD_VALUE}"
-    echo "PORT=${PORT}"
+    echo "LISTEN_PORT=${PORT}"
+    echo "PUBLIC_PORT=${link_port}"
     echo "SNI=${SNI_VALUE}"
     echo "CONGESTION_CONTROL=${CONGESTION_CONTROL}"
     echo
   } >>"${INSTALL_DIR}/links.txt"
 
+  if [[ -n "$PUBLIC_HOST" ]]; then
+    echo "PUBLIC_HOST=${PUBLIC_HOST}" >>"${INSTALL_DIR}/links.txt"
+    echo "TUIC_PUBLIC_LINK=$(make_link "$PUBLIC_HOST" "TUIC-NAT" "$link_port")" >>"${INSTALL_DIR}/links.txt"
+    return 0
+  fi
+
   if ipv4="$(get_public_ip 4)"; then
-    link4="$(make_link "$ipv4" "TUIC-IPv4")"
+    link4="$(make_link "$ipv4" "TUIC-IPv4" "$link_port")"
     echo "IPv4=${ipv4}" >>"${INSTALL_DIR}/links.txt"
     echo "TUIC_IPV4_LINK=${link4}" >>"${INSTALL_DIR}/links.txt"
   fi
 
   if ipv6="$(get_public_ip 6)"; then
-    link6="$(make_link "$ipv6" "TUIC-IPv6")"
+    link6="$(make_link "$ipv6" "TUIC-IPv6" "$link_port")"
     echo "IPv6=${ipv6}" >>"${INSTALL_DIR}/links.txt"
     echo "TUIC_IPV6_LINK=${link6}" >>"${INSTALL_DIR}/links.txt"
   fi
@@ -403,8 +484,10 @@ print_links() {
     log "no saved link file found at ${INSTALL_DIR}/links.txt"
   fi
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl --no-pager --full status "${SERVICE_NAME}.service" || true
+  elif command -v rc-service >/dev/null 2>&1; then
+    rc-service "${SERVICE_NAME}" status || true
   fi
 }
 
@@ -414,12 +497,18 @@ install_service() {
   require_cmd curl
   require_cmd openssl
   require_cmd sha256sum
-  require_cmd systemctl
 
   [[ -n "$PORT" ]] || die "--port is required"
   valid_port "$PORT" || die "invalid port: $PORT"
+  if [[ -n "$EXTERNAL_PORT" ]]; then
+    valid_port "$EXTERNAL_PORT" || die "invalid external port: $EXTERNAL_PORT"
+  fi
+  if [[ -n "$PUBLIC_HOST" ]]; then
+    valid_public_host "$PUBLIC_HOST" || die "invalid public host: $PUBLIC_HOST"
+  fi
   [[ "$CONGESTION_CONTROL" =~ ^(cubic|new_reno|bbr)$ ]] || die "invalid congestion control: $CONGESTION_CONTROL"
-  valid_service_name "$SERVICE_NAME" || die "invalid systemd service name: $SERVICE_NAME"
+  [[ "$(detect_service_manager)" != "none" ]] || die "missing supported service manager: systemd or OpenRC"
+  valid_service_name "$SERVICE_NAME" || die "invalid service name: $SERVICE_NAME"
   valid_sni "$SNI_VALUE" || die "invalid SNI value: $SNI_VALUE"
 
   if [[ -z "$UUID_VALUE" ]]; then
@@ -437,14 +526,7 @@ install_service() {
   write_config
   write_service
   open_firewall
-
-  systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}.service"
-  sleep 1
-  systemctl is-active --quiet "${SERVICE_NAME}.service" || {
-    systemctl --no-pager --full status "${SERVICE_NAME}.service" || true
-    die "service failed to start"
-  }
+  start_service
 
   save_links
   print_links
@@ -452,11 +534,16 @@ install_service() {
 
 uninstall_service() {
   need_root
-  valid_service_name "$SERVICE_NAME" || die "invalid systemd service name: $SERVICE_NAME"
-  if command -v systemctl >/dev/null 2>&1; then
+  valid_service_name "$SERVICE_NAME" || die "invalid service name: $SERVICE_NAME"
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl disable --now "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
     systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if command -v rc-service >/dev/null 2>&1; then
+    rc-service "${SERVICE_NAME}" stop >/dev/null 2>&1 || true
+    rc-update del "${SERVICE_NAME}" default >/dev/null 2>&1 || true
+    rm -f "/etc/init.d/${SERVICE_NAME}"
   fi
   rm -f "$BIN_PATH"
   safe_remove_dir "$CONFIG_DIR"
@@ -468,6 +555,8 @@ ACTION="install"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -p|--port) PORT="${2:-}"; shift 2 ;;
+    --external-port) EXTERNAL_PORT="${2:-}"; shift 2 ;;
+    --public-host) PUBLIC_HOST="${2:-}"; shift 2 ;;
     -u|--uuid) UUID_VALUE="${2:-}"; shift 2 ;;
     -w|--password) PASSWORD_VALUE="${2:-}"; shift 2 ;;
     -s|--sni) SNI_VALUE="${2:-}"; shift 2 ;;

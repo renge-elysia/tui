@@ -1,6 +1,6 @@
 # TUIC 一键安装脚本
 
-用于在常见 Linux VPS 上快速部署 TUIC v5 服务端。脚本会自动下载 `tuic-server`，生成配置与自签 TLS 证书，创建 systemd 服务，监听你指定的 UDP 端口，并在安装完成后输出 IPv4 / IPv6 节点链接。
+用于在常见 Linux VPS 上快速部署 TUIC v5 服务端。脚本会自动下载 `tuic-server`，生成配置与自签 TLS 证书，创建 systemd 或 OpenRC 服务，监听你指定的 UDP 端口，并在安装完成后输出 IPv4 / IPv6 节点链接。
 
 ## 特性
 
@@ -8,13 +8,13 @@
 - 默认监听 `[::]:PORT`，支持 IPv4 / IPv6 双栈
 - 自动生成 UUID、密码和自签 TLS 证书
 - 自动识别 VPS 架构并下载对应 `tuic-server` 二进制
-- 自动创建、启动并启用 systemd 服务
+- 自动创建、启动并启用 systemd / OpenRC 服务
 - 自动输出 TUIC 节点链接，方便复制到客户端
 - 支持重新打印节点信息和一键卸载
 
 ## 支持系统
 
-脚本面向带 systemd 的 Linux VPS，常见发行版包括：
+脚本面向带 systemd 或 OpenRC 的 Linux VPS，常见发行版包括：
 
 - Debian / Ubuntu
 - AlmaLinux / Rocky Linux / CentOS / Fedora
@@ -36,6 +36,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) --port 8443
+```
+
+如果 `raw.githubusercontent.com` 返回 `429`，说明当前 VPS IP 访问 GitHub raw 被限流。可以换用 jsDelivr：
+
+```bash
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) --port 443
+```
+
+也可以直接下载仓库后执行：
+
+```bash
+curl -fL https://github.com/renge-elysia/tui/archive/refs/heads/main.tar.gz -o tui.tar.gz
+tar -xzf tui.tar.gz
+bash tui-main/install.sh --port 443
 ```
 
 安装完成后，终端会输出类似内容：
@@ -89,6 +103,40 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 - `cubic`
 - `new_reno`
 
+## NAT VPS / 端口转发 VPS
+
+NAT VPS 通常有两个端口：
+
+- 内网监听端口：服务实际在 VPS 内监听的端口
+- 公网映射端口：服务商分配给你的外部访问端口
+
+脚本中的 `--port` 是内网监听端口。节点链接里的公网地址和公网端口用 `--public-host`、`--external-port` 指定。
+
+如果服务商给你的转发规则是：
+
+```text
+公网 IP:30001 -> VPS 内网:49255/udp
+```
+
+安装命令应写成：
+
+```bash
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) \
+  --port 49255 \
+  --external-port 30001 \
+  --public-host 公网IP或域名
+```
+
+如果公网端口和内网监听端口相同，只需要：
+
+```bash
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/renge-elysia/tui@main/install.sh) \
+  --port 49255 \
+  --public-host 公网IP或域名
+```
+
+NAT VPS 必须确认服务商控制面板里已经转发了对应的 UDP 端口。只转发 TCP 不够，TUIC 需要 UDP。
+
 ## 常用命令
 
 重新打印节点信息：
@@ -126,6 +174,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `-p, --port` | TUIC UDP 监听端口，安装时必填 | 无 |
+| `--external-port` | NAT / 端口转发 VPS 的公网映射端口 | 与 `--port` 相同 |
+| `--public-host` | NAT / 端口转发 VPS 的公网 IP 或域名 | 自动检测公网 IP |
 | `-u, --uuid` | TUIC 用户 UUID | 随机生成 |
 | `-w, --password` | TUIC 用户密码 | 随机生成 |
 | `-s, --sni` | 自签证书 CN 和节点链接里的 SNI | `www.bing.com` |
@@ -134,7 +184,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 | `--no-firewall` | 不自动配置 `ufw` / `firewalld` | 关闭 |
 | `--install-dir` | 节点信息保存目录 | `/opt/tuic` |
 | `--config-dir` | 配置和证书目录 | `/etc/tuic` |
-| `--service-name` | systemd 服务名 | `tuic` |
+| `--service-name` | 服务名 | `tuic` |
 | `--print` | 输出已保存的节点信息 | 无 |
 | `--uninstall` | 卸载服务、配置和二进制文件 | 无 |
 | `-h, --help` | 查看帮助 | 无 |
@@ -148,7 +198,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/instal
 /etc/tuic/config.json
 /etc/tuic/certificate.crt
 /etc/tuic/private.key
-/etc/systemd/system/tuic.service
+/etc/systemd/system/tuic.service 或 /etc/init.d/tuic
 /opt/tuic/links.txt
 ```
 

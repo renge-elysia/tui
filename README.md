@@ -1,60 +1,100 @@
-# TUIC VPS Installer
+# TUIC 一键安装脚本
 
-一个用于常见 Linux VPS 的 TUIC v5 一键安装脚本。脚本会安装 `tuic-server`，生成自签 TLS 证书，创建 systemd 服务，监听指定 UDP 端口，并把 IPv4 / IPv6 节点链接输出到终端。
+用于在常见 Linux VPS 上快速部署 TUIC v5 服务端。脚本会自动下载 `tuic-server`，生成配置与自签 TLS 证书，创建 systemd 服务，监听你指定的 UDP 端口，并在安装完成后输出 IPv4 / IPv6 节点链接。
 
-## 功能
+## 特性
 
-- 指定任意合法端口监听 TUIC：`--port 443`
-- 默认监听 `[::]:PORT`，开启 `dual_stack` 和 IPv6 UDP relay
-- 自动生成 UUID、密码和自签证书
-- 自动识别 Linux 架构并下载 release 二进制
-- 自动创建并启动 systemd 服务
-- 自动输出 IPv4 和 IPv6 节点链接
-- 支持重新打印节点信息和卸载
+- 支持自定义任意合法端口，例如 `443`、`8443`、`2053`
+- 默认监听 `[::]:PORT`，支持 IPv4 / IPv6 双栈
+- 自动生成 UUID、密码和自签 TLS 证书
+- 自动识别 VPS 架构并下载对应 `tuic-server` 二进制
+- 自动创建、启动并启用 systemd 服务
+- 自动输出 TUIC 节点链接，方便复制到客户端
+- 支持重新打印节点信息和一键卸载
 
-## 快速使用
+## 支持系统
 
-在 VPS 上执行：
+脚本面向带 systemd 的 Linux VPS，常见发行版包括：
+
+- Debian / Ubuntu
+- AlmaLinux / Rocky Linux / CentOS / Fedora
+- openSUSE
+- Arch Linux
+- Alpine Linux
+
+脚本会尝试自动安装基础依赖：`curl`、`openssl`、`ca-certificates`、`coreutils`。
+
+## 一键安装
+
+默认随机生成 UUID 和密码，只需要指定端口：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/YOUR_REPO/main/install.sh) --port 443
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) --port 443
 ```
 
-如果是在克隆后的项目目录中执行：
+如果你的 VPS 没有开放 443 UDP，可以换成其他端口：
 
 ```bash
-sudo bash install.sh --port 443
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) --port 8443
 ```
 
-安装完成后，终端会输出类似：
+安装完成后，终端会输出类似内容：
 
 ```text
+UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+PASSWORD=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PORT=443
+SNI=www.bing.com
+CONGESTION_CONTROL=bbr
+
+IPv4=1.2.3.4
 TUIC_IPV4_LINK=tuic://...
+
+IPv6=2001:db8::1
 TUIC_IPV6_LINK=tuic://...
 ```
 
-TUIC 基于 QUIC，主要使用 UDP。请确认 VPS 云厂商安全组也放行了对应 UDP 端口。
+有 IPv6 地址时会输出 IPv6 链接；没有 IPv6 时只输出 IPv4 链接。
 
-## 常用命令
+## 自定义安装
 
-指定端口、SNI 和拥塞控制：
+指定 SNI：
 
 ```bash
-sudo bash install.sh --port 8443 --sni example.com --congestion-control bbr
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) \
+  --port 443 \
+  --sni example.com
 ```
 
 指定 UUID 和密码：
 
 ```bash
-sudo bash install.sh --port 443 \
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) \
+  --port 443 \
   --uuid 00000000-0000-4000-8000-000000000000 \
   --password 'change-this-password'
 ```
 
-重新输出节点信息：
+指定拥塞控制算法：
 
 ```bash
-sudo bash install.sh --print
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) \
+  --port 443 \
+  --congestion-control bbr
+```
+
+可选值：
+
+- `bbr`
+- `cubic`
+- `new_reno`
+
+## 常用命令
+
+重新打印节点信息：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) --print
 ```
 
 查看服务状态：
@@ -63,30 +103,45 @@ sudo bash install.sh --print
 systemctl status tuic --no-pager
 ```
 
+查看运行日志：
+
+```bash
+journalctl -u tuic -e --no-pager
+```
+
+重启服务：
+
+```bash
+systemctl restart tuic
+```
+
 卸载：
 
 ```bash
-sudo bash install.sh --uninstall
+bash <(curl -fsSL https://raw.githubusercontent.com/renge-elysia/tui/main/install.sh) --uninstall
 ```
 
-## 参数
+## 参数说明
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `-p, --port` | TUIC UDP 监听端口，安装时必填 | 无 |
 | `-u, --uuid` | TUIC 用户 UUID | 随机生成 |
 | `-w, --password` | TUIC 用户密码 | 随机生成 |
-| `-s, --sni` | 自签证书 CN 和链接里的 SNI | `www.bing.com` |
-| `-c, --congestion-control` | `cubic`、`new_reno` 或 `bbr` | `bbr` |
-| `-v, --version` | `tuic-server` release 标签 | `latest` |
-| `--no-firewall` | 不自动配置 ufw/firewalld | 关闭 |
+| `-s, --sni` | 自签证书 CN 和节点链接里的 SNI | `www.bing.com` |
+| `-c, --congestion-control` | 拥塞控制算法：`bbr`、`cubic`、`new_reno` | `bbr` |
+| `-v, --version` | 指定 `tuic-server` release 标签 | `latest` |
+| `--no-firewall` | 不自动配置 `ufw` / `firewalld` | 关闭 |
 | `--install-dir` | 节点信息保存目录 | `/opt/tuic` |
 | `--config-dir` | 配置和证书目录 | `/etc/tuic` |
 | `--service-name` | systemd 服务名 | `tuic` |
-| `--print` | 输出已保存节点信息 | 无 |
-| `--uninstall` | 卸载服务、配置和二进制 | 无 |
+| `--print` | 输出已保存的节点信息 | 无 |
+| `--uninstall` | 卸载服务、配置和二进制文件 | 无 |
+| `-h, --help` | 查看帮助 | 无 |
 
-## 安装后的文件
+## 安装位置
+
+脚本会写入以下文件：
 
 ```text
 /usr/local/bin/tuic-server
@@ -97,9 +152,15 @@ sudo bash install.sh --uninstall
 /opt/tuic/links.txt
 ```
 
-## 生成的服务端配置
+节点信息保存在：
 
-脚本生成的核心配置如下：
+```text
+/opt/tuic/links.txt
+```
+
+## 服务端配置
+
+脚本生成的核心配置示例：
 
 ```json
 {
@@ -114,18 +175,35 @@ sudo bash install.sh --uninstall
   "udp_relay_ipv6": true,
   "zero_rtt_handshake": false,
   "dual_stack": true,
+  "auth_timeout": "3s",
+  "task_negotiation_timeout": "3s",
+  "max_idle_time": "10s",
+  "max_external_packet_size": 1500,
+  "send_window": 16777216,
+  "receive_window": 8388608,
+  "gc_interval": "3s",
+  "gc_lifetime": "15s",
   "log_level": "warn"
 }
 ```
 
+## 放行端口
+
+TUIC 基于 QUIC，主要使用 UDP。安装后请确认两处都已放行对应 UDP 端口：
+
+- VPS 系统防火墙，例如 `ufw` 或 `firewalld`
+- 云厂商安全组 / 防火墙规则
+
+脚本会自动尝试配置 `ufw` 和 `firewalld`，但云厂商安全组通常需要在控制台手动放行。
+
 ## 注意事项
 
-- 如果 VPS 没有 IPv6 地址，脚本只会输出 IPv4 链接。
-- 如果系统内核或发行版没有启用 IPv4-mapped IPv6 socket，`dual_stack` 可能无法同时监听 IPv4 和 IPv6。这种情况下建议优先使用支持 dual-stack 的常见发行版，如 Debian、Ubuntu、AlmaLinux、Rocky Linux。
-- 脚本生成的是自签证书，因此节点链接包含 `allow_insecure=1`。
-- 自动防火墙配置只处理 `ufw` 和 `firewalld`。云厂商安全组需要手动放行 UDP 端口。
+- 脚本生成的是自签证书，因此节点链接会包含 `allow_insecure=1`。
+- 如果 VPS 没有 IPv6 地址，IPv6 链接不会输出。
+- 如果系统不支持 IPv4-mapped IPv6 socket，双栈监听可能无法同时覆盖 IPv4 和 IPv6。
+- 如果安装失败，先查看 `systemctl status tuic --no-pager` 和 `journalctl -u tuic -e --no-pager`。
 
-## 上游
+## 上游项目
 
-- TUIC 协议仓库：[tuic-protocol/tuic](https://github.com/tuic-protocol/tuic)
-- `tuic-server` release：[tuic-protocol/tuic/releases](https://github.com/tuic-protocol/tuic/releases)
+- TUIC 协议：[tuic-protocol/tuic](https://github.com/tuic-protocol/tuic)
+- `tuic-server` 发布页：[tuic-protocol/tuic/releases](https://github.com/tuic-protocol/tuic/releases)
